@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tacticus Energy Planner</title>
+<style>
+:root{
+  --bg:#16213b; --panel:#1f2e52; --line:#34477a; --text:#ece6d6; --mute:#a9b3cf;
+  --brass:#d4a73c; --warn:#e0795a; --ok:#7fc29b;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+*,*::before,*::after{box-sizing:inherit}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:1.5rem;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 18px;font-size:.9rem}
+.now{background:var(--panel);border:1px solid var(--line);border-left:6px solid var(--brass);border-radius:6px;padding:18px 18px 14px;margin-bottom:18px}
+.now .lbl{color:var(--mute);font-size:.9rem}
+.now .big{font-family:Georgia,serif;font-size:4.2rem;line-height:1.05;color:var(--brass);font-variant-numeric:tabular-nums}
+.now .big small{font-size:1.2rem;color:var(--mute)}
+.now .row{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:8px;font-size:.92rem;font-variant-numeric:tabular-nums}
+.now .row b{color:var(--text)}
+.msg{margin-top:10px;font-size:.95rem}
+.msg.warn{color:var(--warn)} .msg.ok{color:var(--ok)}
+form,.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+label{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--mute)}
+input,select{font:inherit;font-size:1rem;color:var(--text);background:#0f1830;border:1px solid var(--line);border-radius:4px;padding:9px 10px;min-height:44px}
+input:focus-visible,select:focus-visible{outline:2px solid var(--brass);outline-offset:1px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+caption{text-align:left;font-family:Georgia,serif;font-size:1.1rem;padding:0 0 8px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--mute);font-weight:normal;font-size:.85rem}
+td:last-child,th:last-child{text-align:right}
+tr.cur td{background:#2b3f70;color:var(--brass);font-weight:bold}
+tr.end td{border-bottom:2px solid var(--brass)}
+.note{color:var(--mute);font-size:.8rem;margin-top:14px;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+  <h1>Tacticus Energy Planner</h1>
+  <p class="sub">Shows how much energy you can hold right now and still hit your cap exactly at reset.</p>
+
+  <section class="now" aria-live="off">
+    <div class="lbl">Energy you should have right now <span id="clock"></span></div>
+    <div class="big"><span id="target">0</span><small> / <span id="capShow">157</span></small></div>
+    <div class="row">
+      <span>Reset at <b id="resetAt">–</b></span>
+      <span>In <b id="countdown">–</b></span>
+    </div>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <form class="grid" onsubmit="return false">
+    <label>Energy cap<input id="cap" type="number" min="1" max="1000" inputmode="numeric" value="157"></label>
+    <label>Your energy now (optional)<input id="mine" type="number" min="0" max="1000" inputmode="numeric" placeholder="e.g. 90"></label>
+    <label>Bonus energy planned<input id="bonus" type="number" min="0" max="1000" inputmode="numeric" value="0"></label>
+    <label>Minutes per energy<input id="mins" type="number" min="0.5" step="0.5" inputmode="decimal" value="5"></label>
+    <label>Daily reset
+      <select id="mode">
+        <option value="utc">12:00 AM UTC (7 PM winter / 8 PM summer on US East Coast)</option>
+        <option value="19">7 PM local time</option>
+        <option value="20">8 PM local time</option>
+      </select>
+    </label>
+  </form>
+
+  <table>
+    <caption>Hour-by-hour plan</caption>
+    <thead><tr><th>Time</th><th>Most energy to hold</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <p class="note">
+    Stay at or under the number for each hour and you won’t waste regen before reset. The highlighted row is the current hour.
+    The 5 minutes per energy rate comes from fan guides, not an official source; change it if the game differs.
+    The “12:00 AM UTC” reset option is an inference from the 7 PM / 8 PM shift you described. If your reset doesn’t move with daylight saving, pick a fixed local time instead.
+    Settings are saved only in this browser.
+  </p>
+</main>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var KEY = "tacticus-energy-planner";
+  var ids = ["cap","mine","bonus","mins","mode"];
+
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    ids.forEach(function(i){ if (saved[i] !== undefined && saved[i] !== null) $(i).value = saved[i]; });
+  } catch(e) {}
+
+  function save(){
+    try {
+      var o = {}; ids.forEach(function(i){ o[i] = $(i).value; });
+      localStorage.setItem(KEY, JSON.stringify(o));
+    } catch(e) {}
+  }
+
+  function num(id, def){ var v = parseFloat($(id).value); return isFinite(v) ? v : def; }
+
+  function nextReset(now){
+    var m = $("mode").value;
+    if (m === "utc") {
+      var t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) + 864e5;
+      return new Date(t);
+    }
+    var d = new Date(now); d.setHours(parseInt(m,10), 0, 0, 0);
+    if (d <= now) d.setDate(d.getDate() + 1);
+    return d;
+  }
+
+  function fmtTime(d, withMin){
+    return d.toLocaleTimeString([], withMin ? {hour:"numeric", minute:"2-digit"} : {hour:"numeric"});
+  }
+  function pad(n){ return (n < 10 ? "0" : "") + n; }
+
+  var lastKey = "";
+
+  function tick(){
+    var now = new Date();
+    var cap = Math.max(1, num("cap", 157));
+    var mins = Math.max(0.1, num("mins", 5));
+    var bonus = Math.max(0, num("bonus", 0));
+    var rate = 60 / mins;
+    var reset = nextReset(now);
+    var hu = (reset - now) / 36e5;                       // hours until reset
+    var limit = Math.max(0, cap - bonus);                // energy to have at reset
+    var target = Math.max(0, limit - rate * hu);
+    var startH = Math.ceil(limit / rate);                // hours before reset the ramp begins
+
+    $("clock").textContent = "(" + fmtTime(now, true) + ")";
+    $("target").textContent = Math.floor(target);
+    $("capShow").textContent = cap;
+    $("resetAt").textContent = fmtTime(reset, true);
+    var s = Math.floor((reset - now) / 1000);
+    $("countdown").textContent = Math.floor(s/3600) + "h " + pad(Math.floor(s%3600/60)) + "m " + pad(s%60) + "s";
+
+    var msg = $("msg"), mine = parseFloat($("mine").value);
+    var rampStart = new Date(reset.getTime() - (limit / rate) * 36e5);
+    if (hu > limit / rate) {
+      msg.className = "msg ok";
+      msg.textContent = "Regen can’t overflow yet. Your cap fills only if you hold energy from " + fmtTime(rampStart, true) + " onward.";
+    } else if (isFinite(mine)) {
+      var over = Math.ceil(mine - target);
+      if (over > 0) { msg.className = "msg warn"; msg.textContent = "Spend about " + over + " energy now to stay on plan."; }
+      else { msg.className = "msg ok"; msg.textContent = "On plan. You’re " + Math.floor(target - mine) + " under the limit."; }
+    } else {
+      msg.className = "msg"; msg.textContent = "";
+    }
+
+    // table
+    var curN = Math.ceil(hu);
+    var key = [cap, mins, bonus, $("mode").value, reset.getTime(), curN].join("|");
+    if (key !== lastKey) {
+      lastKey = key;
+      var html = "";
+      for (var n = startH; n >= 0; n--) {
+        var t = new Date(reset.getTime() - n * 36e5);
+        var e = Math.max(0, Math.round((limit - rate * n) * 100) / 100);
+        html += '<tr class="' + (n === curN ? "cur " : "") + (n === 0 ? "end" : "") + '"><td>' +
+                fmtTime(t, n === startH && false) + (n === 0 ? " (reset)" : "") + "</td><td>" + e + "</td></tr>";
+      }
+      $("rows").innerHTML = html;
+    }
+  }
+
+  ids.forEach(function(i){
+    $(i).addEventListener("input", function(){ save(); lastKey = ""; tick(); });
+  });
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>
